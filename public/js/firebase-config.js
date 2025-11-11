@@ -39,13 +39,13 @@ import {
 
 const firebaseConfig = {
     // Replace with your Firebase config
-    apiKey: "your-api-key",
-    authDomain: "your-project.firebaseapp.com",
-    projectId: "your-project-id",
-    storageBucket: "your-project.appspot.com",
-    messagingSenderId: "123456789",
-    appId: "your-app-id",
-    measurementId: "G-XXXXXXXXXX"
+  apiKey: "AIzaSyBq3IuxjMRX82FPwox66g2uN53eqGmiS9U",
+  authDomain: "shift-guard.firebaseapp.com",
+  projectId: "shift-guard",
+  storageBucket: "shift-guard.firebasestorage.app",
+  messagingSenderId: "557303792577",
+  appId: "1:557303792577:web:5977a52774908d5619a540",
+  measurementId: "G-DNZLDKHE3Q"
 };
 
 // Initialize Firebase
