@@ -7,11 +7,55 @@ class DataService {
         this.cache = new Map();
     }
 
-    // Employee Management
+    // Enhanced Employee Management with Excel Support
+    async processEmployeeExcel(file, metadata) {
+        try {
+            // Upload file to Firebase Storage
+            const timestamp = Date.now();
+            const fileName = `employees_${timestamp}_${file.name}`;
+            const storageRef = ref(storage, `employee-data/${fileName}`);
+            const snapshot = await uploadBytes(storageRef, file);
+            const downloadURL = await getDownloadURL(snapshot.ref);
+
+            // Create employee import record
+            const importDoc = await addDoc(collection(db, 'employeeImports'), {
+                fileName: file.name,
+                storagePath: snapshot.ref.fullPath,
+                fileURL: downloadURL,
+                uploadedBy: authService.currentUser.uid,
+                uploadedAt: serverTimestamp(),
+                status: 'processing',
+                metadata: metadata,
+                processedEmployees: 0,
+                error: null
+            });
+
+            // Trigger Cloud Function for processing
+            const processEmployeeImport = httpsCallable(functions, 'processEmployeeImport');
+            await processEmployeeImport({ 
+                importId: importDoc.id,
+                costCentre: metadata.costCentre
+            });
+
+            await authService.logActivity('employee_import_uploaded', {
+                importId: importDoc.id,
+                fileName: file.name,
+                costCentre: metadata.costCentre
+            });
+
+            return importDoc.id;
+        } catch (error) {
+            console.error('Error uploading employee data:', error);
+            throw error;
+        }
+    }
+
+    // Get employees with advanced filtering
     async getEmployees(filters = {}) {
         try {
             let q = collection(db, 'employees');
             
+            // Apply filters
             if (filters.department) {
                 q = query(q, where('department', '==', filters.department));
             }
@@ -20,6 +64,9 @@ class DataService {
             }
             if (filters.costCentre) {
                 q = query(q, where('costCentre', '==', filters.costCentre));
+            }
+            if (filters.position) {
+                q = query(q, where('position', '==', filters.position));
             }
             if (filters.isActive !== undefined) {
                 q = query(q, where('isActive', '==', filters.isActive));
@@ -30,25 +77,37 @@ class DataService {
             q = query(q, orderBy('name'));
             
             const snapshot = await getDocs(q);
-            return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            return snapshot.docs.map(doc => ({ 
+                id: doc.id, 
+                ...doc.data(),
+                // Add calculated fields
+                weeklyCost: this.calculateWeeklyCost(doc.data())
+            }));
         } catch (error) {
             console.error('Error fetching employees:', error);
             throw error;
         }
     }
 
+    // Enhanced employee addition with validation
     async addEmployee(employeeData) {
         if (!authService.hasPermission('manager')) {
             throw new Error('Insufficient permissions');
         }
 
         try {
+            // Validate employee data
+            this.validateEmployeeData(employeeData);
+
             const docRef = await addDoc(collection(db, 'employees'), {
                 ...employeeData,
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp(),
                 isActive: true,
-                createdBy: authService.currentUser.uid
+                createdBy: authService.currentUser.uid,
+                // Ensure numeric fields
+                hourlyRate: parseFloat(employeeData.hourlyRate),
+                billRate: parseFloat(employeeData.billRate) || 0
             });
             
             await authService.logActivity('employee_created', {
@@ -63,123 +122,167 @@ class DataService {
         }
     }
 
-    // Timesheet Management
-    async uploadTimesheet(file, metadata) {
+    // Update employee
+    async updateEmployee(employeeId, updates) {
+        if (!authService.hasPermission('manager')) {
+            throw new Error('Insufficient permissions');
+        }
+
         try {
-            // Upload file to Firebase Storage
-            const timestamp = Date.now();
-            const fileName = `timesheet_${timestamp}_${file.name}`;
-            const storageRef = ref(storage, `timesheets/${fileName}`);
-            const snapshot = await uploadBytes(storageRef, file);
-            const downloadURL = await getDownloadURL(snapshot.ref);
-
-            // Create timesheet record
-            const timesheetDoc = await addDoc(collection(db, 'timesheets'), {
-                fileName: file.name,
-                storagePath: snapshot.ref.fullPath,
-                fileURL: downloadURL,
-                uploadedBy: authService.currentUser.uid,
-                uploadedAt: serverTimestamp(),
-                status: 'processing',
-                metadata: metadata,
-                processedEntries: 0,
-                error: null
+            await updateDoc(doc(db, 'employees', employeeId), {
+                ...updates,
+                updatedAt: serverTimestamp(),
+                updatedBy: authService.currentUser.uid
             });
 
-            // Trigger Cloud Function for processing
-            const processTimesheet = httpsCallable(functions, 'processTimesheet');
-            await processTimesheet({ 
-                timesheetId: timesheetDoc.id,
-                costCentre: metadata.costCentre
+            await authService.logActivity('employee_updated', {
+                employeeId: employeeId,
+                updates: Object.keys(updates)
             });
-
-            await authService.logActivity('timesheet_uploaded', {
-                timesheetId: timesheetDoc.id,
-                fileName: file.name,
-                costCentre: metadata.costCentre
-            });
-
-            return timesheetDoc.id;
         } catch (error) {
-            console.error('Error uploading timesheet:', error);
+            console.error('Error updating employee:', error);
             throw error;
         }
     }
 
-    // Calculations and Reports
-    async getCalculations(filters = {}) {
-        try {
-            let q = collection(db, 'calculations');
-            
-            if (filters.costCentre) {
-                q = query(q, where('costCentre', '==', filters.costCentre));
-            }
-            if (filters.startDate && filters.endDate) {
-                q = query(q, 
-                    where('calculationDate', '>=', filters.startDate),
-                    where('calculationDate', '<=', filters.endDate)
-                );
-            }
-            
-            q = query(q, orderBy('calculationDate', 'desc'), limit(1000));
-            
-            const snapshot = await getDocs(q);
-            return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        } catch (error) {
-            console.error('Error fetching calculations:', error);
-            throw error;
+    // Bulk employee operations
+    async bulkUpdateEmployees(employeeIds, updates) {
+        if (!authService.hasPermission('admin')) {
+            throw new Error('Insufficient permissions');
         }
-    }
 
-    async generateReport(reportType, params) {
-        try {
-            const generateReport = httpsCallable(functions, 'generateReport');
-            const result = await generateReport({
-                reportType,
-                params,
-                requestedBy: authService.currentUser.uid
-            });
-            
-            await authService.logActivity('report_generated', {
-                reportType,
-                params
-            });
-            
-            return result.data;
-        } catch (error) {
-            console.error('Error generating report:', error);
-            throw error;
-        }
-    }
-
-    // Real-time Subscriptions
-    subscribeToEmployees(callback, filters = {}) {
-        let q = collection(db, 'employees');
-        q = query(q, where('isActive', '==', true), orderBy('name'));
+        const batch = writeBatch(db);
         
-        const unsubscribe = onSnapshot(q, (snapshot) => {
-            const employees = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            callback(employees);
+        employeeIds.forEach(employeeId => {
+            const employeeRef = doc(db, 'employees', employeeId);
+            batch.update(employeeRef, {
+                ...updates,
+                updatedAt: serverTimestamp(),
+                updatedBy: authService.currentUser.uid
+            });
         });
-        
-        this.unsubscribes.set('employees', unsubscribe);
-        return unsubscribe;
+
+        try {
+            await batch.commit();
+            await authService.logActivity('employees_bulk_updated', {
+                count: employeeIds.length,
+                updates: Object.keys(updates)
+            });
+        } catch (error) {
+            console.error('Error in bulk update:', error);
+            throw error;
+        }
     }
 
-    subscribeToTimesheets(callback, limitCount = 10) {
+    // Employee search
+    async searchEmployees(searchTerm, filters = {}) {
+        try {
+            // Since Firestore doesn't support full-text search, we'll filter client-side
+            const allEmployees = await this.getEmployees(filters);
+            
+            return allEmployees.filter(emp => 
+                emp.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                emp.employeeNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                emp.department?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                emp.position?.toLowerCase().includes(searchTerm.toLowerCase())
+            );
+        } catch (error) {
+            console.error('Error searching employees:', error);
+            throw error;
+        }
+    }
+
+    // Employee statistics
+    async getEmployeeStats() {
+        try {
+            const employees = await this.getEmployees();
+            
+            const stats = {
+                total: employees.length,
+                byDepartment: {},
+                byAgency: {},
+                byCostCentre: {},
+                byPosition: {},
+                active: employees.filter(emp => emp.isActive).length,
+                inactive: employees.filter(emp => !emp.isActive).length,
+                totalWeeklyCost: employees.reduce((sum, emp) => sum + (emp.weeklyCost || 0), 0)
+            };
+
+            employees.forEach(emp => {
+                // Department stats
+                stats.byDepartment[emp.department] = (stats.byDepartment[emp.department] || 0) + 1;
+                
+                // Agency stats
+                stats.byAgency[emp.agency] = (stats.byAgency[emp.agency] || 0) + 1;
+                
+                // Cost centre stats
+                stats.byCostCentre[emp.costCentre] = (stats.byCostCentre[emp.costCentre] || 0) + 1;
+                
+                // Position stats
+                stats.byPosition[emp.position] = (stats.byPosition[emp.position] || 0) + 1;
+            });
+
+            return stats;
+        } catch (error) {
+            console.error('Error getting employee stats:', error);
+            throw error;
+        }
+    }
+
+    // Validation helper
+    validateEmployeeData(employeeData) {
+        const required = ['employeeNumber', 'name', 'department', 'costCentre', 'position', 'agency', 'hourlyRate'];
+        const missing = required.filter(field => !employeeData[field]);
+        
+        if (missing.length > 0) {
+            throw new Error(`Missing required fields: ${missing.join(', ')}`);
+        }
+
+        if (isNaN(parseFloat(employeeData.hourlyRate))) {
+            throw new Error('Hourly rate must be a number');
+        }
+
+        if (parseFloat(employeeData.hourlyRate) <= 0) {
+            throw new Error('Hourly rate must be positive');
+        }
+    }
+
+    // Cost calculation helper
+    calculateWeeklyCost(employee) {
+        const standardHours = 45; // Standard work week
+        const hourlyRate = parseFloat(employee.hourlyRate) || 0;
+        return standardHours * hourlyRate;
+    }
+
+    // Real-time subscriptions for employee imports
+    subscribeToEmployeeImports(callback, limitCount = 10) {
         const q = query(
-            collection(db, 'timesheets'),
+            collection(db, 'employeeImports'),
             orderBy('uploadedAt', 'desc'),
             limit(limitCount)
         );
         
         const unsubscribe = onSnapshot(q, (snapshot) => {
-            const timesheets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            callback(timesheets);
+            const imports = snapshot.docs.map(doc => ({ 
+                id: doc.id, 
+                ...doc.data(),
+                statusText: this.getImportStatusText(doc.data().status)
+            }));
+            callback(imports);
         });
         
-        this.unsubscribes.set('timesheets', unsubscribe);
+        this.unsubscribes.set('employeeImports', unsubscribe);
         return unsubscribe;
+    }
+
+    getImportStatusText(status) {
+        const statusMap = {
+            'processing': 'Processing...',
+            'completed': 'Completed',
+            'failed': 'Failed',
+            'validating': 'Validating data'
+        };
+        return statusMap[status] || status;
     }
 
     // Cleanup
@@ -196,27 +299,47 @@ class DataService {
         }
 
         const costCenters = [
-            { id: '3040034', name: 'General Operations', departments: ['Inbound', 'Inventory', 'Picking', 'Despatch'] },
-            { id: '3040038', name: 'Beauty', departments: ['Beauty Inbound', 'Beauty Inventory', 'Beauty Picking', 'Beauty Despatch'] },
-            { id: '3040040', name: 'Ecom/Bash', departments: ['Ecom', 'Bash'] }
+            { 
+                id: '3040034', 
+                name: 'General Operations', 
+                departments: ['Inbound', 'Inventory', 'Picking', 'Despatch'],
+                color: '#3498db'
+            },
+            { 
+                id: '3040038', 
+                name: 'Beauty', 
+                departments: ['Beauty Inbound', 'Beauty Inventory', 'Beauty Picking', 'Beauty Despatch'],
+                color: '#e74c3c'
+            },
+            { 
+                id: '3040040', 
+                name: 'Ecom/Bash', 
+                departments: ['Ecom', 'Bash'],
+                color: '#2ecc71'
+            }
         ];
         
         this.cache.set('costCenters', costCenters);
         return costCenters;
     }
 
-    async getBusinessRules() {
-        return {
-            dayShiftHours: 8.5,
-            nightShiftHours: 8,
-            paidHoursPerShift: 7.5,
-            standardHoursPerWeek: 45,
-            overtimeRate: 1.5,
-            nightShiftAllowanceRate: 0.10,
-            comfortBreakMinutes: 20,
-            teaBreakMinutes: 30,
-            lunchBreakMinutes: 60
-        };
+    async getAgencies() {
+        return ['Adcorp Blu', 'Workforce', 'TFG Permanent', 'Other'];
+    }
+
+    async getPositions() {
+        return [
+            'DCA', 
+            'DCA Trainee', 
+            'General Worker Historic', 
+            'Order Picker/Forklift Driver Historic',
+            'Service Delivery Assistant',
+            'VNA Operator Historic',
+            'Clerk',
+            'Assistant Technician Historic',
+            'Supervisor',
+            'Manager'
+        ];
     }
 }
 
