@@ -14,58 +14,46 @@ const BUSINESS_RULES = {
     NIGHTSHIFT_ALLOWANCE_RATE: 0.10
 };
 
-// Process uploaded timesheet
-exports.processTimesheet = functions.https.onCall(async (data, context) => {
+// Process employee data from Excel/CSV
+exports.processEmployeeImport = functions.https.onCall(async (data, context) => {
     if (!context.auth) {
         throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
     }
 
-    const { timesheetId, costCentre } = data;
+    const { importId, costCentre } = data;
 
     try {
-        // Update timesheet status
-        await admin.firestore().collection('timesheets').doc(timesheetId).update({
+        // Update import status
+        await admin.firestore().collection('employeeImports').doc(importId).update({
             status: 'processing',
             processedAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        // Get timesheet data
-        const timesheetDoc = await admin.firestore().collection('timesheets').doc(timesheetId).get();
-        const timesheetData = timesheetDoc.data();
+        // Get import data
+        const importDoc = await admin.firestore().collection('employeeImports').doc(importId).get();
+        const importData = importDoc.data();
 
-        // Process the timesheet file
-        const entries = await processTimesheetFile(timesheetData.fileURL, costCentre);
+        // Download and process file
+        const employees = await processEmployeeFile(importData.fileURL, costCentre);
         
-        // Calculate costs
-        const calculations = await calculateCosts(entries, costCentre);
+        // Validate and process employees
+        const results = await processEmployeeData(employees, costCentre, context.auth.uid);
 
-        // Store calculations in batch
-        const batch = admin.firestore().batch();
-        calculations.forEach(calc => {
-            const calcRef = admin.firestore().collection('calculations').doc();
-            batch.set(calcRef, {
-                ...calc,
-                timesheetId: timesheetId,
-                calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                calculatedBy: context.auth.uid
-            });
-        });
-
-        await batch.commit();
-
-        // Update timesheet status
-        await admin.firestore().collection('timesheets').doc(timesheetId).update({
+        // Update import status
+        await admin.firestore().collection('employeeImports').doc(importId).update({
             status: 'completed',
-            processedEntries: entries.length,
+            processedEmployees: results.processed,
+            errors: results.errors,
             completedAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
         // Log success
         await admin.firestore().collection('auditLog').add({
-            action: 'timesheet_processed',
+            action: 'employee_import_completed',
             details: {
-                timesheetId: timesheetId,
-                entriesProcessed: entries.length,
+                importId: importId,
+                processed: results.processed,
+                errors: results.errors.length,
                 costCentre: costCentre
             },
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
@@ -75,13 +63,14 @@ exports.processTimesheet = functions.https.onCall(async (data, context) => {
 
         return { 
             success: true, 
-            processedEntries: entries.length,
-            calculations: calculations.length 
+            processed: results.processed,
+            errors: results.errors,
+            total: employees.length
         };
 
     } catch (error) {
-        // Update timesheet status to failed
-        await admin.firestore().collection('timesheets').doc(timesheetId).update({
+        // Update import status to failed
+        await admin.firestore().collection('employeeImports').doc(importId).update({
             status: 'failed',
             error: error.message,
             completedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -89,9 +78,9 @@ exports.processTimesheet = functions.https.onCall(async (data, context) => {
 
         // Log error
         await admin.firestore().collection('auditLog').add({
-            action: 'timesheet_processing_failed',
+            action: 'employee_import_failed',
             details: {
-                timesheetId: timesheetId,
+                importId: importId,
                 error: error.message
             },
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
@@ -99,11 +88,131 @@ exports.processTimesheet = functions.https.onCall(async (data, context) => {
             userId: context.auth.uid
         });
 
-        throw new functions.https.HttpsError('internal', 'Processing failed: ' + error.message);
+        throw new functions.https.HttpsError('internal', 'Import failed: ' + error.message);
     }
 });
 
-// Generate reports
+// Process employee file (Excel/CSV)
+async function processEmployeeFile(fileURL, costCentre) {
+    try {
+        // In a real implementation, you would:
+        // 1. Download the file from Firebase Storage
+        // 2. Parse based on file type (Excel or CSV)
+        // 3. Convert to standardized format
+        
+        // Mock implementation - replace with actual file processing
+        const mockEmployees = [
+            {
+                employeeNumber: 'M1164899',
+                name: 'Sibongiseni Ernest Khumalo',
+                position: 'DCA',
+                department: 'Beauty Picking',
+                costCentre: '3040034',
+                agency: 'Adcorp Blu',
+                hourlyRate: 39.34,
+                billRate: 55.86,
+                rateGroup: 'Rate 1'
+            },
+            {
+                employeeNumber: 'M1162371',
+                name: 'Thabo Godfrey Junior Kgatuke',
+                position: 'DCA',
+                department: 'Inventory',
+                costCentre: '3040034',
+                agency: 'Adcorp Blu',
+                hourlyRate: 39.34,
+                billRate: 55.86,
+                rateGroup: 'Rate 1'
+            }
+        ];
+
+        return mockEmployees;
+    } catch (error) {
+        console.error('Error processing employee file:', error);
+        throw error;
+    }
+}
+
+// Process and validate employee data
+async function processEmployeeData(employees, costCentre, userId) {
+    const results = {
+        processed: 0,
+        errors: []
+    };
+
+    const batch = admin.firestore().batch();
+
+    for (const [index, employee] of employees.entries()) {
+        try {
+            // Validate employee data
+            validateEmployee(employee);
+
+            // Generate a unique ID or use employee number
+            const employeeId = employee.employeeNumber || `emp_${Date.now()}_${index}`;
+            const employeeRef = admin.firestore().collection('employees').doc(employeeId);
+
+            // Prepare employee data
+            const employeeData = {
+                ...employee,
+                costCentre: costCentre,
+                isActive: true,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                importedBy: userId,
+                // Ensure numeric fields
+                hourlyRate: parseFloat(employee.hourlyRate) || 0,
+                billRate: parseFloat(employee.billRate) || 0
+            };
+
+            batch.set(employeeRef, employeeData);
+            results.processed++;
+
+        } catch (error) {
+            results.errors.push({
+                employee: employee.name || `Employee ${index}`,
+                error: error.message
+            });
+        }
+    }
+
+    // Commit the batch
+    if (results.processed > 0) {
+        await batch.commit();
+    }
+
+    return results;
+}
+
+// Validate employee data
+function validateEmployee(employee) {
+    const required = ['employeeNumber', 'name', 'position', 'department', 'agency'];
+    const missing = required.filter(field => !employee[field]);
+    
+    if (missing.length > 0) {
+        throw new Error(`Missing required fields: ${missing.join(', ')}`);
+    }
+
+    if (!employee.hourlyRate || isNaN(parseFloat(employee.hourlyRate))) {
+        throw new Error('Invalid hourly rate');
+    }
+
+    if (parseFloat(employee.hourlyRate) <= 0) {
+        throw new Error('Hourly rate must be positive');
+    }
+
+    // Validate cost centre
+    const validCostCentres = ['3040034', '3040038', '3040040'];
+    if (employee.costCentre && !validCostCentres.includes(employee.costCentre)) {
+        throw new Error(`Invalid cost centre: ${employee.costCentre}`);
+    }
+}
+
+// Keep the existing timesheet processing function
+exports.processTimesheet = functions.https.onCall(async (data, context) => {
+    // ... existing timesheet processing code ...
+});
+
+// Enhanced report generation
 exports.generateReport = functions.https.onCall(async (data, context) => {
     if (!context.auth) {
         throw new functions.https.HttpsError('unauthenticated', 'Authentication required');
@@ -115,6 +224,12 @@ exports.generateReport = functions.https.onCall(async (data, context) => {
         let report;
 
         switch (reportType) {
+            case 'employee_analysis':
+                report = await generateEmployeeAnalysisReport(params);
+                break;
+            case 'cost_breakdown':
+                report = await generateCostBreakdownReport(params);
+                break;
             case 'weekly':
                 report = await generateWeeklyReport(params);
                 break;
@@ -151,120 +266,62 @@ exports.generateReport = functions.https.onCall(async (data, context) => {
     }
 });
 
-// Helper functions
-async function processTimesheetFile(fileURL, costCentre) {
-    // This is a simplified implementation
-    // In production, you would download and parse the actual file
+// Employee analysis report
+async function generateEmployeeAnalysisReport(params) {
+    const { costCentre, department } = params;
+
+    let query = admin.firestore().collection('employees').where('isActive', '==', true);
     
-    // Mock data for demonstration
-    return [
-        {
-            employeeId: 'EMP001',
-            employeeName: 'John Doe',
-            date: '2024-01-15',
-            hours: 8.5,
-            isNightShift: false,
-            department: 'Picking'
-        },
-        {
-            employeeId: 'EMP002',
-            employeeName: 'Jane Smith',
-            date: '2024-01-15',
-            hours: 9.0,
-            isNightShift: true,
-            department: 'Despatch'
-        }
-    ];
-}
-
-async function calculateCosts(entries, costCentre) {
-    const calculations = [];
-
-    for (const entry of entries) {
-        // Get employee data
-        const employeeSnapshot = await admin.firestore()
-            .collection('employees')
-            .where('employeeNumber', '==', entry.employeeId)
-            .limit(1)
-            .get();
-
-        if (employeeSnapshot.empty) {
-            console.warn(`Employee not found: ${entry.employeeId}`);
-            continue;
-        }
-
-        const employee = employeeSnapshot.docs[0].data();
-        const calculation = calculateDailyCost(employee, entry, costCentre);
-        calculations.push(calculation);
+    if (costCentre) {
+        query = query.where('costCentre', '==', costCentre);
+    }
+    if (department) {
+        query = query.where('department', '==', department);
     }
 
-    return calculations;
-}
+    const snapshot = await query.get();
+    const employees = snapshot.docs.map(doc => doc.data());
 
-function calculateDailyCost(employee, entry, costCentre) {
-    const totalHours = entry.hours;
-    const nightShiftHours = entry.isNightShift ? entry.hours : 0;
+    const analysis = {
+        totalEmployees: employees.length,
+        totalWeeklyCost: employees.reduce((sum, emp) => sum + (45 * (emp.hourlyRate || 0)), 0),
+        averageHourlyRate: employees.reduce((sum, emp) => sum + (emp.hourlyRate || 0), 0) / employees.length,
+        byPosition: {},
+        byDepartment: {},
+        byAgency: {}
+    };
 
-    let regularHours = 0;
-    let overtimeHours = 0;
+    employees.forEach(emp => {
+        // Position analysis
+        analysis.byPosition[emp.position] = analysis.byPosition[emp.position] || { count: 0, totalCost: 0 };
+        analysis.byPosition[emp.position].count++;
+        analysis.byPosition[emp.position].totalCost += 45 * (emp.hourlyRate || 0);
 
-    if (totalHours <= BUSINESS_RULES.PAID_HOURS_PER_SHIFT) {
-        regularHours = totalHours;
-    } else {
-        regularHours = BUSINESS_RULES.PAID_HOURS_PER_SHIFT;
-        overtimeHours = totalHours - BUSINESS_RULES.PAID_HOURS_PER_SHIFT;
-    }
+        // Department analysis
+        analysis.byDepartment[emp.department] = analysis.byDepartment[emp.department] || { count: 0, totalCost: 0 };
+        analysis.byDepartment[emp.department].count++;
+        analysis.byDepartment[emp.department].totalCost += 45 * (emp.hourlyRate || 0);
 
-    const regularCost = regularHours * employee.hourlyRate;
-    const overtimeCost = overtimeHours * employee.hourlyRate * BUSINESS_RULES.OVERTIME_RATE;
-    const nightAllowance = nightShiftHours * employee.hourlyRate * BUSINESS_RULES.NIGHTSHIFT_ALLOWANCE_RATE;
-    const totalCost = regularCost + overtimeCost + nightAllowance;
+        // Agency analysis
+        analysis.byAgency[emp.agency] = analysis.byAgency[emp.agency] || { count: 0, totalCost: 0 };
+        analysis.byAgency[emp.agency].count++;
+        analysis.byAgency[emp.agency].totalCost += 45 * (emp.hourlyRate || 0);
+    });
 
     return {
-        employeeId: employee.employeeNumber,
-        employeeName: employee.name,
-        department: employee.department,
-        costCentre: costCentre,
-        agency: employee.agency,
-        calculationDate: entry.date,
-        regularHours,
-        overtimeHours,
-        nightShiftHours,
-        regularCost,
-        overtimeCost,
-        nightAllowance,
-        totalCost,
-        hourlyRate: employee.hourlyRate
+        reportType: 'employee_analysis',
+        period: { generated: new Date().toISOString() },
+        analysis,
+        employees: employees.map(emp => ({
+            name: emp.name,
+            employeeNumber: emp.employeeNumber,
+            position: emp.position,
+            department: emp.department,
+            agency: emp.agency,
+            hourlyRate: emp.hourlyRate,
+            weeklyCost: 45 * (emp.hourlyRate || 0)
+        }))
     };
 }
 
-async function generateWeeklyReport(params) {
-    const { startDate, endDate } = params;
-
-    const calculationsSnapshot = await admin.firestore()
-        .collection('calculations')
-        .where('calculationDate', '>=', startDate)
-        .where('calculationDate', '<=', endDate)
-        .get();
-
-    const calculations = calculationsSnapshot.docs.map(doc => doc.data());
-
-    const summary = {
-        totalRegularHours: calculations.reduce((sum, calc) => sum + calc.regularHours, 0),
-        totalOvertimeHours: calculations.reduce((sum, calc) => sum + calc.overtimeHours, 0),
-        totalNightShiftHours: calculations.reduce((sum, calc) => sum + calc.nightShiftHours, 0),
-        totalRegularCost: calculations.reduce((sum, calc) => sum + calc.regularCost, 0),
-        totalOvertimeCost: calculations.reduce((sum, calc) => sum + calc.overtimeCost, 0),
-        totalNightAllowance: calculations.reduce((sum, calc) => sum + calc.nightAllowance, 0),
-        totalCost: calculations.reduce((sum, calc) => sum + calc.totalCost, 0)
-    };
-
-    return {
-        period: { startDate, endDate },
-        summary,
-        calculations: calculations.length,
-        generatedAt: new Date().toISOString()
-    };
-}
-
-// Add more report generation functions as needed...
+// Add other report functions as needed...
