@@ -47,19 +47,17 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize services
-const auth = getAuth(app);
-const db = getFirestore(app);
-const storage = getStorage(app);
-const functions = getFunctions(app);
+// Initialize services - make them global
+window.auth = getAuth(app);
+window.db = getFirestore(app);
+window.storage = getStorage(app);
+window.functions = getFunctions(app);
 
-// Export Firebase services
-export { 
-    app, auth, db, storage, functions,
+// Make Firebase functions globally available
+window.firebaseServices = {
     signInWithEmailAndPassword,
     signOut,
     onAuthStateChanged,
-    updateProfile,
     collection, doc, getDocs, getDoc, addDoc, updateDoc, setDoc,
     query, where, orderBy, limit, onSnapshot, serverTimestamp,
     ref, uploadBytes, getDownloadURL,
