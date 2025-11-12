@@ -1,4 +1,17 @@
-import { auth, db, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile, doc, getDoc, setDoc, serverTimestamp } from './firebase-config.js';
+import { 
+    auth, 
+    db, 
+    signInWithEmailAndPassword, 
+    signOut, 
+    onAuthStateChanged, 
+    updateProfile, 
+    doc, 
+    getDoc, 
+    setDoc, 
+    collection,
+    addDoc,
+    serverTimestamp 
+} from './firebase-config.js';
 
 class AuthService {
     constructor() {
@@ -9,6 +22,7 @@ class AuthService {
 
     initAuthListener() {
         onAuthStateChanged(auth, async (user) => {
+            console.log('Auth state changed:', user);
             if (user) {
                 this.currentUser = user;
                 await this.loadUserProfile(user.uid);
@@ -26,6 +40,7 @@ class AuthService {
             const userDoc = await getDoc(doc(db, 'users', uid));
             if (userDoc.exists()) {
                 this.userProfile = userDoc.data();
+                console.log('User profile loaded:', this.userProfile);
                 this.updateUI();
             } else {
                 // Create user profile if it doesn't exist
@@ -56,13 +71,15 @@ class AuthService {
 
     async login(email, password) {
         try {
+            console.log('Attempting login for:', email);
             const userCredential = await signInWithEmailAndPassword(auth, email, password);
+            console.log('Login successful:', userCredential.user);
             
             // Update last login
             if (userCredential.user) {
-                await updateDoc(doc(db, 'users', userCredential.user.uid), {
+                await setDoc(doc(db, 'users', userCredential.user.uid), {
                     lastLogin: serverTimestamp()
-                });
+                }, { merge: true });
             }
             
             // Log login activity
@@ -70,8 +87,9 @@ class AuthService {
             
             return { success: true, user: userCredential.user };
         } catch (error) {
+            console.error('Login error:', error);
             await this.logActivity('login_failed', { email, error: error.message });
-            return { success: false, error: error.message };
+            return { success: false, error: this.getAuthErrorMessage(error) };
         }
     }
 
@@ -100,10 +118,34 @@ class AuthService {
         }
     }
 
+    getAuthErrorMessage(error) {
+        switch (error.code) {
+            case 'auth/invalid-email':
+                return 'Invalid email address';
+            case 'auth/user-disabled':
+                return 'This account has been disabled';
+            case 'auth/user-not-found':
+                return 'No account found with this email';
+            case 'auth/wrong-password':
+                return 'Incorrect password';
+            case 'auth/too-many-requests':
+                return 'Too many failed attempts. Please try again later';
+            default:
+                return 'Login failed. Please try again';
+        }
+    }
+
     updateUI() {
-        if (this.userProfile) {
-            document.getElementById('userName').textContent = this.userProfile.name || this.currentUser.email;
-            document.getElementById('userRole').textContent = this.userProfile.role;
+        if (this.userProfile && this.currentUser) {
+            const userNameElement = document.getElementById('userName');
+            const userRoleElement = document.getElementById('userRole');
+            
+            if (userNameElement) {
+                userNameElement.textContent = this.userProfile.name || this.currentUser.email;
+            }
+            if (userRoleElement) {
+                userRoleElement.textContent = this.userProfile.role;
+            }
             
             // Update navigation based on role
             this.updateNavigation();
@@ -113,7 +155,7 @@ class AuthService {
     updateNavigation() {
         const adminView = document.querySelector('a[data-view="admin"]');
         if (adminView) {
-            if (this.userProfile.role !== 'admin') {
+            if (this.userProfile?.role !== 'admin') {
                 adminView.style.display = 'none';
             } else {
                 adminView.style.display = 'block';
@@ -122,13 +164,23 @@ class AuthService {
     }
 
     showApp() {
-        document.getElementById('loginView').classList.add('d-none');
-        document.getElementById('appView').classList.remove('d-none');
+        const loginView = document.getElementById('loginView');
+        const appView = document.getElementById('appView');
+        
+        if (loginView) loginView.classList.add('d-none');
+        if (appView) appView.classList.remove('d-none');
+        
+        console.log('Showing app view');
     }
 
     showLogin() {
-        document.getElementById('loginView').classList.remove('d-none');
-        document.getElementById('appView').classList.add('d-none');
+        const loginView = document.getElementById('loginView');
+        const appView = document.getElementById('appView');
+        
+        if (loginView) loginView.classList.remove('d-none');
+        if (appView) appView.classList.add('d-none');
+        
+        console.log('Showing login view');
     }
 
     hasPermission(requiredRole) {
